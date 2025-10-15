@@ -1,1 +1,1 @@
-# easy-rl-for-llms
+# Easy RL for LLMs
