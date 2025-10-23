@@ -23,6 +23,7 @@ class TrainConfig:
     grad_clip: float = 1.0
     output_dir: Path = Path("results")
     save_every: int = None
+    use_baseline: bool = True
 
 
 def parse_args() -> Namespace:
@@ -34,6 +35,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=None)
+    parser.add_argument("--disable-baseline", action="store_true", help="Disable batch-mean baseline.")
     return parser.parse_args()
 
 
@@ -81,9 +83,17 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             prompts = batch["prompts"]
             texts, logprobs = policy.generate_with_logprobs(prompts)
             rewards = reward(texts).to(device=logprobs.device, dtype=logprobs.dtype)
-            # REINFORCE objective: maximise E[r*sum log pi]  -> minimise negative
-            # without baseline
-            loss = -(logprobs * rewards).mean()
+            if config.use_baseline:
+                # Advantage: reward - baseline
+                # Baseline: mean reward of the batch
+                # Baseline reduces variance in policy gradient estimates,
+                # while keeping it unbiased
+                baseline = rewards.mean()
+                advantages = rewards - baseline
+            else:
+                advantages = rewards
+            # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
+            loss = -(logprobs * advantages).mean()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.model.parameters(), config.grad_clip)
             optimizer.step()
@@ -138,6 +148,7 @@ def main():
         grad_clip=args.grad_clip,
         output_dir=output_dir,
         save_every=args.save_every,
+        use_baseline=not args.disable_baseline,
     )
 
     # Initialise policy (LLM), dataloader, and optimizer
