@@ -8,9 +8,9 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
-from easy_rl.data import make_dataloader, TEST_TOPIC
+from easy_rl.data import TOPICS, TEST_TOPIC, make_dataloader
 from easy_rl.hf_policy import HFPolicy
 from easy_rl.rewards import reward
 
@@ -60,11 +60,19 @@ def plot_training_metrics(epoch_losses: List[float], epoch_rewards: List[float],
     plt.close(fig)
 
 
-def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> None:
+def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> List[Tuple[int, str, str]]:
     policy.model.train()
     epoch_losses = []
     epoch_rewards = []
     output_dir = config.output_dir
+    train_samples: List[Tuple[int, str, str]] = []
+
+    # Track generations of the first training prompt
+    tracking_prompt = TOPICS[0]
+    # Generate the initial generation before training
+    initial_sample = policy.generate([tracking_prompt])[0]
+    train_samples.append((0, tracking_prompt, initial_sample))
+
     for epoch in range(config.num_epochs):
         batch_losses = []
         batch_rewards = []
@@ -81,24 +89,36 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             optimizer.step()
             batch_losses.append(loss.detach().item())
             batch_rewards.append(rewards.detach().mean().item())
+
+        # Log mean loss and reward
         mean_loss = sum(batch_losses) / max(len(batch_losses), 1)
         mean_reward = sum(batch_rewards) / max(len(batch_rewards), 1)
         epoch_losses.append(mean_loss)
         epoch_rewards.append(mean_reward)
         print(f"Epoch {epoch+1}/{config.num_epochs} loss: {mean_loss:.4f} reward: {mean_reward:.4f}")
+
+        # Save the model every `save_every` epochs
         if config.save_every and (epoch + 1) % config.save_every == 0:
             ckpt_path = output_dir / f"model_{epoch+1}.pth"
             torch.save(policy.model.state_dict(), ckpt_path)
             print(f"Model saved to {ckpt_path}")
+
+        # Generate the sample after training
+        sample_text = policy.generate([tracking_prompt])[0]
+        train_samples.append((epoch + 1, tracking_prompt, sample_text))
+
+    # Save the final model
     ckpt_path = output_dir / f"model_final.pth"
     torch.save(policy.model.state_dict(), ckpt_path)
     print(f"Model saved to {ckpt_path}")
     policy.model.eval()
     plot_training_metrics(epoch_losses, epoch_rewards, output_dir)
+    return train_samples
 
 
 def main():
     args = parse_args()
+    # Initialise output directory
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
@@ -108,6 +128,8 @@ def main():
     if any(output_dir.glob("model_*.pth")):
         print(f"Existing checkpoints found in {output_dir}, exiting without training.")
         return
+
+    # Initialise training configuration
     config = TrainConfig(
         model_id=args.model_id,
         batch_size=args.batch_size,
@@ -115,17 +137,48 @@ def main():
         num_epochs=args.num_epochs,
         grad_clip=args.grad_clip,
         output_dir=output_dir,
+        save_every=args.save_every,
     )
+
+    # Initialise policy (LLM), dataloader, and optimizer
     policy = HFPolicy(config.model_id)
-    test_text = policy.generate([TEST_TOPIC])
     dataloader = make_dataloader(batch_size=config.batch_size)
     optimizer = torch.optim.AdamW(policy.model.parameters(), lr=config.learning_rate)
-    train_reinforce(policy, dataloader, optimizer, config)
+
+    # Generate completion on test prompt before training
+    test_text = policy.generate([TEST_TOPIC])
+
+    # Train the policy
+    train_samples = train_reinforce(policy, dataloader, optimizer, config)
+
+    # Peformance on test prompt after training
     test_text_after = policy.generate([TEST_TOPIC])
     print("Test text before training:")
     print(test_text)
     print("Test text after training:")
     print(test_text_after)
+    test_log_path = output_dir / "test_texts.txt"
+
+    # Save the test text before and after training
+    with test_log_path.open("w", encoding="utf-8") as f:
+        f.write("Test text before training:\n")
+        for text in test_text:
+            f.write(text.strip() + "\n\n")
+        f.write("Test text after training:\n")
+        for text in test_text_after:
+            f.write(text.strip() + "\n\n")
+
+    # Save the train generations
+    if train_samples:
+        samples_path = output_dir / "train_generations.txt"
+        with samples_path.open("w", encoding="utf-8") as f:
+            for epoch, prompt, generation in train_samples:
+                label = "Initial" if epoch == 0 else f"Epoch {epoch}"
+                f.write(f"{label}\n")
+                f.write("Prompt:\n")
+                f.write(prompt.strip() + "\n\n")
+                f.write("Generation:\n")
+                f.write(generation.strip() + "\n\n")
 
 
 if __name__ == "__main__":
