@@ -13,7 +13,7 @@ from easy_rl.rewards import reward
 class TrainConfig:
     model_id: str = "meta-llama/Llama-3.2-1B-Instruct"
     batch_size: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     num_epochs: int = 10
     grad_clip: float = 1.0
 
@@ -25,7 +25,7 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             optimizer.zero_grad()
             prompts = batch["prompts"]
             texts, logprobs = policy.generate_with_logprobs(prompts)
-            rewards = reward(texts)
+            rewards = reward(texts).to(logprobs.device)
             # REINFORCE objective: maximise E[r*sum log pi]  -> minimise negative
             # without baseline
             loss = -(logprobs * rewards).mean()
