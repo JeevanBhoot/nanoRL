@@ -19,6 +19,7 @@ class TrainConfig:
 
 
 def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> None:
+    policy.model.train()
     for epoch in range(config.num_epochs):
         for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
             optimizer.zero_grad()
@@ -34,12 +35,13 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
         print(f"Epoch {epoch+1}/{config.num_epochs} loss: {loss.item()}")
         torch.save(policy.model.state_dict(), f"model_{epoch+1}.pth")
         print(f"Model saved to model_{epoch+1}.pth")
+    policy.model.eval()
 
 def main():
     config = TrainConfig()
     policy = HFPolicy(config.model_id)
     test_text = policy.generate([TEST_TOPIC])
-    dataloader = make_dataloader(config.batch_size)
+    dataloader = make_dataloader(batch_size=config.batch_size)
     optimizer = torch.optim.AdamW(policy.model.parameters(), lr=config.learning_rate)
     train_reinforce(policy, dataloader, optimizer, config)
     test_text_after = policy.generate([TEST_TOPIC])
