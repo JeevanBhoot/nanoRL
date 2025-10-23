@@ -56,8 +56,9 @@ class HFPolicy:
         return inputs, prompt_lens
 
     @torch.no_grad()
-    def generate(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = GenConfig()) -> List[str]:
+    def generate(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = None) -> List[str]:
         """Generate completions for a batch of prompts."""
+        gen_cfg = gen_cfg or GenConfig()
         inputs, lens = self._tokenize(prompts)
         out = self.model.generate(
             **inputs,
@@ -72,8 +73,9 @@ class HFPolicy:
             texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
         return texts
 
-    def generate_with_logprobs(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = GenConfig()):
+    def generate_with_logprobs(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = None):
         """Sample continuations, then compute differentiable sum(log p) over the generated tokens."""
+        gen_cfg = gen_cfg or GenConfig()
         # 1) sample actions (no gradients needed for sampling)
         inputs, lens = self._tokenize(prompts)
         with torch.no_grad():
