@@ -36,7 +36,7 @@ class HFPolicy:
         torch_dtype: Union[str, torch.dtype] = "bfloat16",
         device_map: Optional[Union[str, dict]] = "auto",
     ):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, padding_side="left")
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
