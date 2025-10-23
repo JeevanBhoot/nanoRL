@@ -68,34 +68,48 @@ class HFPolicy:
         )
         texts = []
         for i in range(len(prompts)):
-            gen_tokens = out[i, lens[i] :]
+            gen_tokens = out[i, lens[i].item():]
             texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
         return texts
 
-    @torch.no_grad()
     def generate_with_logprobs(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = GenConfig()):
-        """Generate completions and return token log-probabilities."""
+        """Sample continuations, then compute differentiable sum(log p) over the generated tokens."""
+        # 1) sample actions (no gradients needed for sampling)
         inputs, lens = self._tokenize(prompts)
-        out = self.model.generate(
-            **inputs,
-            **gen_cfg.to_generate_kwargs(
-                default_pad=self.tokenizer.pad_token_id,
-                default_eos=self.tokenizer.eos_token_id,
-            ),
-            return_dict_in_generate=True,
-            output_scores=True,
-        )
-        seqs, scores = out.sequences, out.scores  # scores: list of [B, V] per gen step
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                **gen_cfg.to_generate_kwargs(
+                    default_pad=self.tokenizer.pad_token_id,
+                    default_eos=self.tokenizer.eos_token_id,
+                ),
+                return_dict_in_generate=True,
+            )
+        seqs = out.sequences  # [B, T_max] (prompt + gen, padded)
 
-        # log-probabilities of the generated tokens at each step
-        # shape: [B, gen_len]
-        logprobs = self.model.compute_transition_scores(
-            sequences=seqs, scores=scores, normalize_logits=True
-        )
+        # 2) differentiable forward on the sampled sequences
+        attn = (seqs != self.tokenizer.pad_token_id).long()
+        outputs = self.model(input_ids=seqs, attention_mask=attn)
+        logits = outputs.logits  # [B, T_max, V]
+        logp = torch.log_softmax(logits[:, :-1, :], dim=-1)    # predict next token
+        tgt = seqs[:, 1:]                                      # target = next token ids
 
-        texts, logprob_sums = [], []
-        for i in range(len(prompts)):
-            gen_tokens = seqs[i, lens[i].item():]
+        # build a mask for the generated region only (exclude prompt and padding)
+        B, Tm1 = tgt.shape
+        idx = torch.arange(Tm1, device=self.device).unsqueeze(0)          # [1, T-1]
+        prompt_starts = lens.unsqueeze(1).to(self.device)                  # [B, 1]
+        seq_lens = attn.sum(dim=1).unsqueeze(1)                            # [B, 1] true lengths
+        gen_mask = (idx >= prompt_starts) & (idx < seq_lens - 1)           # [B, T-1]
+
+        # gather token log-probs and sum over generated positions
+        tok_logp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)          # [B, T-1]
+        tok_logp = tok_logp * gen_mask
+        logprob_sums = tok_logp.sum(dim=1)                                  # [B]
+
+        # decode continuations (for logging/evaluation)
+        texts = []
+        for i in range(seqs.size(0)):
+            gen_tokens = seqs[i, lens[i].item():seq_lens[i].item()]
             texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
-            logprob_sums.append(logprobs[i].sum().item())
-        return texts, torch.tensor(logprob_sums, device=self.device)
+
+        return texts, logprob_sums
