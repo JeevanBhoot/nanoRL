@@ -28,6 +28,8 @@ TOPICS = [
     "Describe the texture of autumn light.",
 ]
 
+TEST_TOPIC = "Write ~100 words: Why would you rather live in the forest than in the city?\n\n"
+
 def batch_prompts(batch_size=8):
     import random
     return [f"Write ~100 words: {random.choice(TOPICS)}\n\n" for _ in range(batch_size)]
