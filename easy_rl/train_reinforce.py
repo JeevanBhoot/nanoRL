@@ -19,9 +19,10 @@ class TrainConfig:
     model_id: str = "meta-llama/Llama-3.2-1B-Instruct"
     batch_size: int = 8
     learning_rate: float = 1e-5
-    num_epochs: int = 10
+    num_epochs: int = 25
     grad_clip: float = 1.0
     output_dir: Path = Path("results")
+    save_every: int = None
 
 
 def parse_args() -> Namespace:
@@ -29,9 +30,10 @@ def parse_args() -> Namespace:
     parser.add_argument("--model-id", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--num-epochs", type=int, default=10)
+    parser.add_argument("--num-epochs", type=int, default=25)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--save-every", type=int, default=None)
     return parser.parse_args()
 
 
@@ -84,9 +86,13 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
         epoch_losses.append(mean_loss)
         epoch_rewards.append(mean_reward)
         print(f"Epoch {epoch+1}/{config.num_epochs} loss: {mean_loss:.4f} reward: {mean_reward:.4f}")
-        ckpt_path = output_dir / f"model_{epoch+1}.pth"
-        torch.save(policy.model.state_dict(), ckpt_path)
-        print(f"Model saved to {ckpt_path}")
+        if config.save_every and (epoch + 1) % config.save_every == 0:
+            ckpt_path = output_dir / f"model_{epoch+1}.pth"
+            torch.save(policy.model.state_dict(), ckpt_path)
+            print(f"Model saved to {ckpt_path}")
+    ckpt_path = output_dir / f"model_final.pth"
+    torch.save(policy.model.state_dict(), ckpt_path)
+    print(f"Model saved to {ckpt_path}")
     policy.model.eval()
     plot_training_metrics(epoch_losses, epoch_rewards, output_dir)
 
