@@ -30,11 +30,6 @@ TOPICS = [
 
 TEST_TOPIC = "Write ~100 words: Why would you rather live in the forest than in the city?\n\n"
 
-def batch_prompts(batch_size=8):
-    import random
-    return [f"Write ~100 words: {random.choice(TOPICS)}\n\n" for _ in range(batch_size)]
-
-
 class TopicDataset(Dataset):
     """Formats topics into prompts with a simple template."""
 
@@ -56,7 +51,7 @@ def _collate_prompts(batch: List[str]) -> dict:
 
 
 def make_dataloader(
-    topics: Optional[Iterable[str]] = TOPICS,
+    topics: Optional[Iterable[str]] = None,
     template: str = "Write ~100 words: {topic}\n\n",
     batch_size: int = 8,
     shuffle: bool = True,
@@ -66,6 +61,7 @@ def make_dataloader(
     """
     Create a simple DataLoader that yields batches of prompt strings.
     """
+    topics = topics or TOPICS
     ds = TopicDataset(topics, template=template)
     return DataLoader(
         ds,
