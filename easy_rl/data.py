@@ -50,9 +50,9 @@ class TopicDataset(Dataset):
         return self.template.format(topic=self.topics[idx])
 
 
-def _collate_prompts(batch: List[str]) -> List[str]:
-    """Keep batches as plain lists of strings."""
-    return batch
+def _collate_prompts(batch: List[str]) -> dict:
+    """Return the batch in the format expected by the trainer."""
+    return {"prompts": batch}
 
 
 def make_dataloader(
