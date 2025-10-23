@@ -59,6 +59,7 @@ class HFPolicy:
     def generate(self, prompts: Sequence[str], gen_cfg: Optional[GenConfig] = None) -> List[str]:
         """Generate completions for a batch of prompts."""
         gen_cfg = gen_cfg or GenConfig()
+        gen_cfg.do_sample = False
         inputs, lens = self._tokenize(prompts)
         out = self.model.generate(
             **inputs,
