@@ -116,3 +116,64 @@ class HFPolicy:
             texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
 
         return texts, logprob_sums
+
+    def generate_k_with_logprobs(
+        self,
+        prompts: Sequence[str],
+        k: int,
+        gen_cfg: Optional[GenConfig] = None,
+    ):
+        """Sample `k` continuations per prompt and return log-probs per sample."""
+        if k < 1:
+            raise ValueError("k must be >= 1 for generate_k_with_logprobs.")
+        gen_cfg = gen_cfg or GenConfig()
+
+        # 1) sample actions (no gradients needed for sampling)
+        inputs, lens = self._tokenize(prompts)
+        batch_size = len(prompts)
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                **gen_cfg.to_generate_kwargs(
+                    default_pad=self.tokenizer.pad_token_id,
+                    default_eos=self.tokenizer.eos_token_id,
+                ),
+                num_return_sequences=k,
+                return_dict_in_generate=True,
+            )
+
+        seqs = out.sequences  # [B*k, T_max]
+        if seqs.size(0) != batch_size * k:
+            raise RuntimeError("Unexpected number of generated sequences returned.")
+
+        # 2) differentiable forward on the sampled sequences
+        attn = (seqs != self.tokenizer.pad_token_id).long()
+        logits = self.model(input_ids=seqs, attention_mask=attn, use_cache=False).logits  # [B*k, T_max, V]
+        logp = torch.log_softmax(logits[:, :-1, :], dim=-1)              # predict next token
+        tgt = seqs[:, 1:]                                                # [B*k, T_max-1]
+
+        _, Tm1 = tgt.shape
+        idx = torch.arange(Tm1, device=self.device).unsqueeze(0)         # [1, T-1]
+        prompt_lens = lens.repeat_interleave(k).unsqueeze(1)             # [B*k, 1]
+        seq_lens = attn.sum(dim=1).unsqueeze(1)                          # [B*k, 1] true lengths
+
+        start_idx = (prompt_lens - 1).clamp_min(0)
+        gen_mask = (idx >= start_idx) & (idx < seq_lens - 1)             # [B*k, T-1]
+
+        tok_logp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)        # [B*k, T-1]
+        tok_logp = tok_logp * gen_mask                                   
+        logprob_sums = tok_logp.sum(dim=1).view(batch_size, k)           # [B, k]
+
+        prompt_lens_flat = prompt_lens.squeeze(1)
+        seq_lens_flat = seq_lens.squeeze(1)
+        texts: List[List[str]] = []
+        for i in range(batch_size):
+            prompt_texts = []
+            for j in range(k):
+                idx_flat = i * k + j
+                start = int(prompt_lens_flat[idx_flat].item())
+                end = int(seq_lens_flat[idx_flat].item())
+                gen_tokens = seqs[idx_flat, start:end]
+                prompt_texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
+            texts.append(prompt_texts)
+        return texts, logprob_sums
