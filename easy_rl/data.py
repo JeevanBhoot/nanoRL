@@ -28,7 +28,11 @@ TOPICS = [
     "Describe the texture of autumn light.",
 ]
 
-TEST_TOPIC = "Write ~100 words: Why would you rather live in the forest than in the city?\n\n"
+TEST_TOPICS = [
+    "Why would you rather live in the forest than in the city?",
+    "Write a short story about a fish with dreams of becoming a pilot.",
+    "Give me a recipe for a meal with the following ingredients: grass, rose, water, salmon, and a secret ingredient.",
+]
 
 class TopicDataset(Dataset):
     """Formats topics into prompts with a simple template."""

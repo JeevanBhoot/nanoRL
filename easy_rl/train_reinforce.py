@@ -8,9 +8,9 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-from easy_rl.data import TOPICS, TEST_TOPIC, make_dataloader
+from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy
 from easy_rl.rewards import reward
 
@@ -154,32 +154,45 @@ def main():
     # Initialise policy (LLM), dataloader, and optimizer
     policy = HFPolicy(config.model_id)
     dataloader = make_dataloader(batch_size=config.batch_size)
+    test_dataloader = make_dataloader(topics=TEST_TOPICS, batch_size=1, shuffle=False)
     optimizer = torch.optim.AdamW(policy.model.parameters(), lr=config.learning_rate)
 
-    # Generate completion on test prompt before training
-    test_text = policy.generate([TEST_TOPIC])
+    # Generate completions on test prompts before training
+    test_texts_before = []
+    for batch in test_dataloader:
+        prompts = batch["prompts"]
+        texts = policy.generate(prompts)[0]
+        test_texts_before.append(texts)
 
     # Train the policy
     train_samples = train_reinforce(policy, dataloader, optimizer, config)
 
-    # Peformance on test prompt after training
-    test_text_after = policy.generate([TEST_TOPIC])
+    # Generate completions on test prompts after training
+    test_texts_after = []
+    for batch in test_dataloader:
+        prompts = batch["prompts"]
+        texts = policy.generate(prompts)[0]
+        test_texts_after.append(texts)
+
     print("Test text before training:")
-    print(test_text)
+    print(test_texts_before[0])
     print("Test text after training:")
-    print(test_text_after)
-    test_log_path = output_dir / "test_texts.txt"
+    print(test_texts_after[0])
 
-    # Save the test text before and after training
+    # Save test generations
+    test_log_path = output_dir / "test_generations.txt"
     with test_log_path.open("w", encoding="utf-8") as f:
-        f.write("Test text before training:\n")
-        for text in test_text:
+        f.write("Test topics:\n")
+        for topic in TEST_TOPICS:
+            f.write(topic.strip() + "\n\n")
+        f.write("Test texts before training:\n")
+        for text in test_texts_before:
             f.write(text.strip() + "\n\n")
-        f.write("Test text after training:\n")
-        for text in test_text_after:
+        f.write("Test texts after training:\n")
+        for text in test_texts_after:
             f.write(text.strip() + "\n\n")
 
-    # Save the train generations
+    # Save train generations (one sample per epoch)
     if train_samples:
         samples_path = output_dir / "train_generations.txt"
         with samples_path.open("w", encoding="utf-8") as f:
