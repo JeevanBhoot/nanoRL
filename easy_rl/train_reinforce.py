@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
-from easy_rl.hf_policy import HFPolicy
+from easy_rl.hf_policy import HFPolicy, GenConfig
 from easy_rl.rewards import reward
 
 @dataclass
@@ -40,9 +40,9 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--baseline",
         type=str.lower,
-        choices=["mean", "ema"],
+        choices=["mean", "ema", "scst"],
         default=None,
-        help="Baseline strategy: mean or EMA (exponential moving average).",
+        help="Baseline strategy",
     )
     parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
     return parser.parse_args()
@@ -107,19 +107,24 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
                     else:
                         ema_baseline = config.baseline_ema_beta * ema_baseline + (1 - config.baseline_ema_beta) * current_mean
                     baseline_value = ema_baseline
+                elif config.baseline == "scst":
+                    # Self-critical sequence training https://arxiv.org/pdf/1612.00563
+                    # Baseline = reward of the model's own greedy decode for the same prompt.
+                    greedy_texts = policy.generate(prompts, gen_cfg=GenConfig(do_sample=False))
+                    baseline_value = reward(greedy_texts).to(rewards.device)   
                 else:
                     raise ValueError(f"Unknown baseline type: {config.baseline}")
 
             # Advantage: reward - baseline
             # Baseline reduces variance in policy gradient estimates,
             # while keeping it unbiased.
-            advantages = rewards - baseline_value if baseline_value is not None else rewards
+            advantages = (rewards - baseline_value).detach() if baseline_value is not None else rewards.detach()
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.model.parameters(), config.grad_clip)
             optimizer.step()
-            
+
             batch_losses.append(loss.detach().item())
             batch_rewards.append(rewards.detach().mean().item())
 
