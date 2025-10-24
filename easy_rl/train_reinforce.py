@@ -1,3 +1,4 @@
+import csv
 import torch
 import torch.nn as nn
 import tqdm
@@ -124,7 +125,16 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
     torch.save(policy.model.state_dict(), ckpt_path)
     print(f"Model saved to {ckpt_path}")
     policy.model.eval()
+
     plot_training_metrics(epoch_losses, epoch_rewards, output_dir)
+
+    # Dump loss and reward to CSV
+    metrics_path = output_dir / "training_metrics.csv"
+    with metrics_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "loss", "reward"])
+        for epoch_idx, (loss_val, reward_val) in enumerate(zip(epoch_losses, epoch_rewards), start=1):
+            writer.writerow([epoch_idx, loss_val, reward_val])
     return train_samples
 
 
