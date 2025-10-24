@@ -1,8 +1,15 @@
+"""
+Train a policy using the REINFORCE algorithm.
+
+Accepts a baseline strategy: mean, ema, or scst.
+mean: use the mean reward of the batch
+ema: use an exponential moving average of the rewards
+scst: use the reward of the model's own greedy decode for the same prompt
+"""
 import csv
 import torch
 import torch.nn as nn
 import tqdm
-import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from argparse import ArgumentParser, Namespace
@@ -14,6 +21,7 @@ from typing import List, Optional, Tuple
 from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy, GenConfig
 from easy_rl.rewards import reward
+from easy_rl.plot import plot_training_metrics
 
 @dataclass
 class TrainConfig:
@@ -46,30 +54,6 @@ def parse_args() -> Namespace:
     )
     parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
     return parser.parse_args()
-
-
-def plot_training_metrics(epoch_losses: List[float], epoch_rewards: List[float], output_dir: Path) -> None:
-    """Plot training metrics (loss and reward) over epochs."""
-    epochs = range(1, len(epoch_losses) + 1)
-    fig, ax_loss = plt.subplots(figsize=(8, 5))
-    color_loss = "#1f77b4"
-    color_reward = "#ff7f0e"
-
-    ax_loss.set_xlabel("Epoch")
-    ax_loss.set_ylabel("Loss", color=color_loss)
-    ax_loss.plot(epochs, epoch_losses, color=color_loss, label="Loss")
-    ax_loss.tick_params(axis="y", labelcolor=color_loss)
-
-    ax_reward = ax_loss.twinx()
-    ax_reward.set_ylabel("Reward", color=color_reward)
-    ax_reward.plot(epochs, epoch_rewards, color=color_reward, label="Reward")
-    ax_reward.tick_params(axis="y", labelcolor=color_reward)
-
-    fig.suptitle("Training Loss and Reward")
-    fig.tight_layout()
-    output_path = output_dir / "training_metrics.png"
-    fig.savefig(output_path)
-    plt.close(fig)
 
 
 def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> List[Tuple[int, str, str]]:
