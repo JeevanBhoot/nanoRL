@@ -35,6 +35,7 @@ class HFPolicy:
         model_id: str,
         dtype: Union[str, torch.dtype] = "bfloat16",
         device_map: Optional[Union[str, dict]] = "auto",
+        forward_chunk_size: Optional[int] = 4,
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, padding_side="left")
         if self.tokenizer.pad_token_id is None:
@@ -45,6 +46,7 @@ class HFPolicy:
             device_map=device_map,
         )
         self.model.eval()
+        self.forward_chunk_size = max(1, forward_chunk_size) if forward_chunk_size else None
 
     @property
     def device(self) -> torch.device:
@@ -90,29 +92,102 @@ class HFPolicy:
             )
         seqs = out.sequences  # [B, T_max] (prompt + gen, padded)
 
-        # 2) differentiable forward on the sampled sequences
+        # 2) differentiable forward on the sampled sequences, optionally in chunks
         attn = (seqs != self.tokenizer.pad_token_id).long()
-        outputs = self.model(input_ids=seqs, attention_mask=attn)
-        logits = outputs.logits  # [B, T_max, V]
-        logp = torch.log_softmax(logits[:, :-1, :], dim=-1)    # predict next token
-        tgt = seqs[:, 1:]                                      # target = next token ids
-
-        # build a mask for the generated region only (exclude prompt and padding)
-        B, Tm1 = tgt.shape
-        idx = torch.arange(Tm1, device=self.device).unsqueeze(0)          # [1, T-1]
-        prompt_starts = lens.unsqueeze(1).to(self.device)                  # [B, 1]
-        seq_lens = attn.sum(dim=1).unsqueeze(1)                            # [B, 1] true lengths
-        gen_mask = (idx >= prompt_starts) & (idx < seq_lens - 1)           # [B, T-1]
-
-        # gather token log-probs and sum over generated positions
-        tok_logp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)          # [B, T-1]
-        tok_logp = tok_logp * gen_mask
-        logprob_sums = tok_logp.sum(dim=1)                                  # [B]
+        seq_lens = attn.sum(dim=1, keepdim=True)
+        start_idx = lens.unsqueeze(1)
+        logprob_sums = self._compute_logprob_sums(
+            seqs=seqs,
+            attn=attn,
+            start_idx=start_idx,
+            seq_lens=seq_lens,
+        )
 
         # decode continuations (for logging/evaluation)
+        seq_lens_flat = seq_lens.squeeze(1)
         texts = []
         for i in range(seqs.size(0)):
-            gen_tokens = seqs[i, lens[i].item():seq_lens[i].item()]
+            gen_tokens = seqs[i, lens[i].item():seq_lens_flat[i].item()]
             texts.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
 
         return texts, logprob_sums
+
+    def generate_k_with_logprobs(
+        self,
+        prompts: Sequence[str],
+        k: int,
+        gen_cfg: Optional[GenConfig] = None,
+    ):
+        """Sample `k` continuations per prompt and return log-probs per sample."""
+        if k < 1:
+            raise ValueError("k must be >= 1 for generate_k_with_logprobs.")
+        gen_cfg = gen_cfg or GenConfig()
+        # 1) sample actions (no gradients needed for sampling)
+        inputs, lens = self._tokenize(prompts)
+        batch_size = len(prompts)
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                **gen_cfg.to_generate_kwargs(
+                    default_pad=self.tokenizer.pad_token_id,
+                    default_eos=self.tokenizer.eos_token_id,
+                ),
+                num_return_sequences=k,
+                return_dict_in_generate=True,
+            )
+        seqs = out.sequences  # [B*k, T_max]
+        if seqs.size(0) != batch_size * k:
+            raise RuntimeError("Unexpected number of generated sequences returned.")
+    
+        # 2) differentiable forward on the sampled sequences
+        attn = (seqs != self.tokenizer.pad_token_id).long()
+        seq_lens = attn.sum(dim=1, keepdim=True)
+        prompt_lens = lens.repeat_interleave(k).unsqueeze(1)
+        start_idx = (prompt_lens - 1).clamp_min(0)
+        flat_logprob_sums = self._compute_logprob_sums(
+            seqs=seqs,
+            attn=attn,
+            start_idx=start_idx,
+            seq_lens=seq_lens,
+        )
+        logprob_sums = flat_logprob_sums.view(batch_size, k)
+
+        # decode generated text only
+        prompt_lens_flat = prompt_lens.squeeze(1)
+        seq_lens_flat = seq_lens.squeeze(1)
+
+        texts: List[List[str]] = []
+        for i in range(batch_size):
+            group = []
+            for j in range(k):
+                idx_flat = i * k + j
+                start = int(prompt_lens_flat[idx_flat].item())
+                end = int(seq_lens_flat[idx_flat].item())
+                gen_tokens = seqs[idx_flat, start:end]
+                group.append(self.tokenizer.decode(gen_tokens, skip_special_tokens=True))
+            texts.append(group)
+
+        return texts, logprob_sums
+
+    def _compute_logprob_sums(
+        self,
+        seqs: torch.Tensor,
+        attn: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute log-prob sums for sequences, processing in chunks."""
+        total = seqs.size(0)
+        chunk = self.forward_chunk_size or total
+        logprob_sums = []
+        for offset in range(0, total, chunk):
+            end = min(offset + chunk, total)
+            seqs_chunk = seqs[offset:end]
+            attn_chunk = attn[offset:end]
+            outputs = self.model(input_ids=seqs_chunk, attention_mask=attn_chunk, use_cache=False)
+            logits = outputs.logits  # [chunk, T_max, V]
+            logp = torch.log_softmax(logits[:, :-1, :], dim=-1)
+            tgt = seqs_chunk[:, 1:]
+
+            valid = (torch.arange(tgt.size(1), device=self.device)[None, :] < attn_chunk.sum(dim=1, keepdim=True) - 1)
+            logprob_sums.append((logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1) * valid).sum(dim=1))
+            
+        return torch.cat(logprob_sums, dim=0)
