@@ -78,8 +78,6 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
             flat_texts = [text for texts in texts_per_prompt for text in texts]
             rewards_flat = reward(flat_texts).to(device=logprobs.device, dtype=logprobs.dtype)
             rewards_tensor = rewards_flat.view(len(prompts), config.group_size)
-            if epoch == 5:
-                breakpoint()
 
             if config.group_size < 2:
                 raise ValueError("RLOO requires group_size >= 2 for leave-one-out baseline.")
@@ -111,7 +109,7 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
             torch.save(policy.model.state_dict(), ckpt_path)
             print(f"Model saved to {ckpt_path}")
 
-        # Generate the sample after each epoch
+        # Generate sample after each epoch
         sample_text = policy.generate([tracking_prompt])[0]
         train_samples.append((epoch + 1, tracking_prompt, sample_text))
 
