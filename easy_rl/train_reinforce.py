@@ -40,6 +40,7 @@ def parse_args() -> Namespace:
 
 
 def plot_training_metrics(epoch_losses: List[float], epoch_rewards: List[float], output_dir: Path) -> None:
+    """Plot training metrics (loss and reward) over epochs."""
     epochs = range(1, len(epoch_losses) + 1)
     fig, ax_loss = plt.subplots(figsize=(8, 5))
     color_loss = "#1f77b4"
@@ -63,6 +64,7 @@ def plot_training_metrics(epoch_losses: List[float], epoch_rewards: List[float],
 
 
 def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> List[Tuple[int, str, str]]:
+    """Train the policy using the REINFORCE algorithm."""
     policy.model.train()
     epoch_losses = []
     epoch_rewards = []
