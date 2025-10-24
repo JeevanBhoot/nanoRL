@@ -27,25 +27,25 @@ from easy_rl.plot import plot_training_metrics
 @dataclass
 class TrainConfig:
     model_id: str = "meta-llama/Llama-3.2-1B-Instruct"
-    batch_size: int = 8
+    batch_size: int = 4
     learning_rate: float = 1e-5
-    num_epochs: int = 25
+    num_epochs: int = 6
     grad_clip: float = 1.0
     output_dir: Path = Path("results")
     save_every: int = None
-    group_size: int = 5
+    group_size: int = 4
 
 
 def parse_args() -> Namespace:
     parser = ArgumentParser()
     parser.add_argument("--model-id", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--num-epochs", type=int, default=25)
+    parser.add_argument("--num-epochs", type=int, default=6)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=None)
-    parser.add_argument("--group-size", type=int, default=5)
+    parser.add_argument("--group-size", type=int, default=4)
     return parser.parse_args()
 
 
@@ -78,6 +78,8 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
             flat_texts = [text for texts in texts_per_prompt for text in texts]
             rewards_flat = reward(flat_texts).to(device=logprobs.device, dtype=logprobs.dtype)
             rewards_tensor = rewards_flat.view(len(prompts), config.group_size)
+            if epoch == 5:
+                breakpoint()
 
             if config.group_size < 2:
                 raise ValueError("RLOO requires group_size >= 2 for leave-one-out baseline.")
@@ -86,7 +88,7 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
             sum_rewards = rewards_tensor.sum(dim=1, keepdim=True)                     # [B, 1]
             loo_baseline = (sum_rewards - rewards_tensor) / (config.group_size - 1)   # [B, k]
             advantages = (rewards_tensor - loo_baseline).detach()                     # [B, k]
-            
+
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()
             loss.backward()
@@ -109,7 +111,7 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
             torch.save(policy.model.state_dict(), ckpt_path)
             print(f"Model saved to {ckpt_path}")
 
-        # Generate the sample after training
+        # Generate the sample after each epoch
         sample_text = policy.generate([tracking_prompt])[0]
         train_samples.append((epoch + 1, tracking_prompt, sample_text))
 
