@@ -9,7 +9,7 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy
@@ -24,7 +24,8 @@ class TrainConfig:
     grad_clip: float = 1.0
     output_dir: Path = Path("results")
     save_every: int = None
-    use_baseline: bool = True
+    baseline: Optional[str] = None
+    baseline_ema_beta: float = 0.9
 
 
 def parse_args() -> Namespace:
@@ -36,7 +37,14 @@ def parse_args() -> Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=None)
-    parser.add_argument("--disable-baseline", action="store_true", help="Disable batch-mean baseline.")
+    parser.add_argument(
+        "--baseline",
+        type=str.lower,
+        choices=["mean", "ema"],
+        default=None,
+        help="Baseline strategy: mean or EMA (exponential moving average).",
+    )
+    parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
     return parser.parse_args()
 
 
@@ -78,6 +86,7 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
     initial_sample = policy.generate([tracking_prompt])[0]
     train_samples.append((0, tracking_prompt, initial_sample))
 
+    ema_baseline: Optional[torch.Tensor] = None
     for epoch in range(config.num_epochs):
         batch_losses = []
         batch_rewards = []
@@ -86,20 +95,31 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             prompts = batch["prompts"]
             texts, logprobs = policy.generate_with_logprobs(prompts)
             rewards = reward(texts).to(device=logprobs.device, dtype=logprobs.dtype)
-            if config.use_baseline:
-                # Advantage: reward - baseline
-                # Baseline: mean reward of the batch
-                # Baseline reduces variance in policy gradient estimates,
-                # while keeping it unbiased
-                baseline = rewards.mean()
-                advantages = rewards - baseline
-            else:
-                advantages = rewards
+
+            baseline_value: Optional[torch.Tensor] = None
+            if config.baseline is not None:
+                if config.baseline == "mean":
+                    baseline_value = rewards.mean()
+                elif config.baseline == "ema":
+                    current_mean = rewards.mean()
+                    if ema_baseline is None:
+                        ema_baseline = current_mean
+                    else:
+                        ema_baseline = config.baseline_ema_beta * ema_baseline + (1 - config.baseline_ema_beta) * current_mean
+                    baseline_value = ema_baseline
+                else:
+                    raise ValueError(f"Unknown baseline type: {config.baseline}")
+
+            # Advantage: reward - baseline
+            # Baseline reduces variance in policy gradient estimates,
+            # while keeping it unbiased.
+            advantages = rewards - baseline_value if baseline_value is not None else rewards
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.model.parameters(), config.grad_clip)
             optimizer.step()
+            
             batch_losses.append(loss.detach().item())
             batch_rewards.append(rewards.detach().mean().item())
 
@@ -160,7 +180,8 @@ def main():
         grad_clip=args.grad_clip,
         output_dir=output_dir,
         save_every=args.save_every,
-        use_baseline=not args.disable_baseline,
+        baseline=args.baseline,
+        baseline_ema_beta=args.baseline_ema_beta,
     )
 
     # Initialise policy (LLM), dataloader, and optimizer
