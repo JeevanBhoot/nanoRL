@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @dataclass
 class GenConfig:
-    """Configuration container for text generation."""
+    """Configuration for text generation."""
 
     max_new_tokens: int = 256
     temperature: float = 0.9
