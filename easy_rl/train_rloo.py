@@ -71,7 +71,7 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
         for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
             optimizer.zero_grad()
             prompts = batch["prompts"]
-            texts_per_prompt, logprobs = policy.generate_k_with_logprobs(
+            texts_per_prompt, logprobs = policy.generate_with_logprobs(
                 prompts,
                 k=config.group_size,
             )
