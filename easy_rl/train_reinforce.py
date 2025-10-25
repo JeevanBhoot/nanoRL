@@ -16,7 +16,7 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy, GenConfig
@@ -36,7 +36,6 @@ class TrainConfig:
     baseline: Optional[str] = None
     baseline_ema_beta: float = 0.9
     alpha: float = 0.0
-    min_length: int = 80
 
 
 def parse_args() -> Namespace:
@@ -56,11 +55,42 @@ def parse_args() -> Namespace:
         help="Baseline strategy",
     )
     parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
-    parser.add_argument("--alpha", type=float, default=0.0)
+    parser.add_argument("--alpha", type=float, default=0.0, help="Scale for brevity penalty.")
     return parser.parse_args()
 
 
-def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> List[Tuple[int, str, str]]:
+def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_baseline: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the log-probs, rewards, and advantages for a batch of prompts."""
+    texts, logprobs = policy.generate_with_logprobs(prompts)
+    rewards = reward(texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
+
+    baseline_value: Optional[torch.Tensor] = None
+    if config.baseline is not None:
+        if config.baseline == "mean":
+            baseline_value = rewards.mean()
+        elif config.baseline == "ema":
+            current_mean = rewards.mean()
+            if ema_baseline is None:
+                ema_baseline = current_mean
+            else:
+                ema_baseline = config.baseline_ema_beta * ema_baseline + (1 - config.baseline_ema_beta) * current_mean
+            baseline_value = ema_baseline
+        elif config.baseline == "scst":
+            # Self-critical sequence training https://arxiv.org/pdf/1612.00563
+            # Baseline = reward of the model's own greedy decode for the same prompt.
+            greedy_texts = policy.generate(prompts, gen_cfg=GenConfig(do_sample=False))
+            baseline_value = reward(greedy_texts, alpha=config.alpha).to(rewards.device)   
+        else:
+            raise ValueError(f"Unknown baseline type: {config.baseline}")
+
+    # Advantage: reward - baseline
+    # Baseline reduces variance in policy gradient estimates,
+    # while keeping it unbiased.
+    advantages = (rewards - baseline_value).detach() if baseline_value is not None else rewards.detach()
+    return logprobs, rewards, advantages, ema_baseline
+
+
+def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig, algorithm_function: Callable) -> List[Tuple[int, str, str]]:
     """Train the policy using the REINFORCE algorithm."""
     policy.model.train()
     epoch_losses = []
@@ -81,32 +111,9 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
         for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
             optimizer.zero_grad()
             prompts = batch["prompts"]
-            texts, logprobs = policy.generate_with_logprobs(prompts)
-            rewards = reward(texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
 
-            baseline_value: Optional[torch.Tensor] = None
-            if config.baseline is not None:
-                if config.baseline == "mean":
-                    baseline_value = rewards.mean()
-                elif config.baseline == "ema":
-                    current_mean = rewards.mean()
-                    if ema_baseline is None:
-                        ema_baseline = current_mean
-                    else:
-                        ema_baseline = config.baseline_ema_beta * ema_baseline + (1 - config.baseline_ema_beta) * current_mean
-                    baseline_value = ema_baseline
-                elif config.baseline == "scst":
-                    # Self-critical sequence training https://arxiv.org/pdf/1612.00563
-                    # Baseline = reward of the model's own greedy decode for the same prompt.
-                    greedy_texts = policy.generate(prompts, gen_cfg=GenConfig(do_sample=False))
-                    baseline_value = reward(greedy_texts, alpha=config.alpha).to(rewards.device)   
-                else:
-                    raise ValueError(f"Unknown baseline type: {config.baseline}")
+            logprobs, rewards, advantages, ema_baseline = algorithm_function(policy, prompts, config, ema_baseline)
 
-            # Advantage: reward - baseline
-            # Baseline reduces variance in policy gradient estimates,
-            # while keeping it unbiased.
-            advantages = (rewards - baseline_value).detach() if baseline_value is not None else rewards.detach()
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()
             loss.backward()
@@ -192,7 +199,7 @@ def main():
         test_texts_before.append(texts)
 
     # Train the policy
-    train_samples = train_reinforce(policy, dataloader, optimizer, config)
+    train_samples = train_reinforce(policy, dataloader, optimizer, config, reinforce)
 
     # Generate completions on test prompts after training
     test_texts_after = []
