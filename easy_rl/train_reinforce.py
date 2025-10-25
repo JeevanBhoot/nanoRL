@@ -23,6 +23,7 @@ from easy_rl.hf_policy import HFPolicy, GenConfig
 from easy_rl.rewards import reward
 from easy_rl.plot import plot_training_metrics
 
+
 @dataclass
 class TrainConfig:
     model_id: str = "meta-llama/Llama-3.2-1B-Instruct"
@@ -34,6 +35,8 @@ class TrainConfig:
     save_every: int = None
     baseline: Optional[str] = None
     baseline_ema_beta: float = 0.9
+    alpha: float = 0.0
+    min_length: int = 80
 
 
 def parse_args() -> Namespace:
@@ -53,6 +56,7 @@ def parse_args() -> Namespace:
         help="Baseline strategy",
     )
     parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
+    parser.add_argument("--alpha", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -78,7 +82,7 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             optimizer.zero_grad()
             prompts = batch["prompts"]
             texts, logprobs = policy.generate_with_logprobs(prompts)
-            rewards = reward(texts).to(device=logprobs.device, dtype=logprobs.dtype)
+            rewards = reward(texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
 
             baseline_value: Optional[torch.Tensor] = None
             if config.baseline is not None:
@@ -95,7 +99,7 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
                     # Self-critical sequence training https://arxiv.org/pdf/1612.00563
                     # Baseline = reward of the model's own greedy decode for the same prompt.
                     greedy_texts = policy.generate(prompts, gen_cfg=GenConfig(do_sample=False))
-                    baseline_value = reward(greedy_texts).to(rewards.device)   
+                    baseline_value = reward(greedy_texts, alpha=config.alpha).to(rewards.device)   
                 else:
                     raise ValueError(f"Unknown baseline type: {config.baseline}")
 
@@ -171,6 +175,7 @@ def main():
         save_every=args.save_every,
         baseline=args.baseline,
         baseline_ema_beta=args.baseline_ema_beta,
+        alpha=args.alpha,
     )
 
     # Initialise policy (LLM), dataloader, and optimizer

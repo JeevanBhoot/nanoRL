@@ -34,6 +34,7 @@ class TrainConfig:
     output_dir: Path = Path("results")
     save_every: int = None
     group_size: int = 4
+    alpha: float = 0.5
 
 
 def parse_args() -> Namespace:
@@ -46,6 +47,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--group-size", type=int, default=4)
+    parser.add_argument("--alpha", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -76,7 +78,7 @@ def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.
 
             # Rewards -> [B, k]
             flat_texts = [text for texts in texts_per_prompt for text in texts]
-            rewards_flat = reward(flat_texts).to(device=logprobs.device, dtype=logprobs.dtype)
+            rewards_flat = reward(flat_texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
             rewards_tensor = rewards_flat.view(len(prompts), config.group_size)
 
             if config.group_size < 2:
@@ -156,6 +158,7 @@ def main():
         output_dir=output_dir,
         save_every=args.save_every,
         group_size=args.group_size,
+        alpha=args.alpha,
     )
 
     # Initialise policy (LLM), dataloader, and optimizer
