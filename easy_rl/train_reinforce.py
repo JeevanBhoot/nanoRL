@@ -59,7 +59,7 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
-def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_baseline: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the log-probs, rewards, and advantages for a batch of prompts."""
     texts, logprobs = policy.generate_with_logprobs(prompts)
     rewards = reward(texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
@@ -70,11 +70,11 @@ def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_bas
             baseline_value = rewards.mean()
         elif config.baseline == "ema":
             current_mean = rewards.mean()
-            if ema_baseline is None:
-                ema_baseline = current_mean
+            if policy.ema_baseline is None:
+                policy.ema_baseline = current_mean
             else:
-                ema_baseline = config.baseline_ema_beta * ema_baseline + (1 - config.baseline_ema_beta) * current_mean
-            baseline_value = ema_baseline
+                policy.ema_baseline = config.baseline_ema_beta * policy.ema_baseline + (1 - config.baseline_ema_beta) * current_mean
+            baseline_value = policy.ema_baseline
         elif config.baseline == "scst":
             # Self-critical sequence training https://arxiv.org/pdf/1612.00563
             # Baseline = reward of the model's own greedy decode for the same prompt.
@@ -87,7 +87,7 @@ def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_bas
     # Baseline reduces variance in policy gradient estimates,
     # while keeping it unbiased.
     advantages = (rewards - baseline_value).detach() if baseline_value is not None else rewards.detach()
-    return logprobs, rewards, advantages, ema_baseline
+    return logprobs, rewards, advantages
 
 
 def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig, algorithm_function: Callable) -> List[Tuple[int, str, str]]:
@@ -104,7 +104,6 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
     initial_sample = policy.generate([tracking_prompt])[0]
     train_samples.append((0, tracking_prompt, initial_sample))
 
-    ema_baseline: Optional[torch.Tensor] = None
     for epoch in range(config.num_epochs):
         batch_losses = []
         batch_rewards = []
@@ -112,7 +111,7 @@ def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.o
             optimizer.zero_grad()
             prompts = batch["prompts"]
 
-            logprobs, rewards, advantages, ema_baseline = algorithm_function(policy, prompts, config, ema_baseline)
+            logprobs, rewards, advantages = algorithm_function(policy, prompts, config)
 
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()

@@ -53,7 +53,7 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
-def rloo(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_baseline: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def rloo(policy: HFPolicy, prompts: List[str], config: TrainConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the log-probs, rewards, and advantages for a batch of prompts using the RLOO algorithm."""
     # Generate k completions for each prompt
     texts_per_prompt, logprobs = policy.generate_with_logprobs(prompts, k=config.group_size)
@@ -68,7 +68,7 @@ def rloo(policy: HFPolicy, prompts: List[str], config: TrainConfig, ema_baseline
     loo_baseline = (sum_rewards - rewards_tensor) / (config.group_size - 1)   # [B, k]
     advantages = (rewards_tensor - loo_baseline).detach()                     # [B, k]
 
-    return logprobs, rewards_tensor, advantages, ema_baseline
+    return logprobs, rewards_tensor, advantages
 
 
 def main():

@@ -45,6 +45,7 @@ class HFPolicy:
             device_map=device_map,
         )
         self.model.eval()
+        self.ema_baseline = None
 
     @property
     def device(self) -> torch.device:
