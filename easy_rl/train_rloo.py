@@ -17,12 +17,14 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy
 from easy_rl.rewards import reward
 from easy_rl.plot import plot_training_metrics
+from easy_rl.train_reinforce import train_reinforce
+
 
 @dataclass
 class TrainConfig:
@@ -47,90 +49,26 @@ def parse_args() -> Namespace:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--group-size", type=int, default=4)
-    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--alpha", type=float, default=0.5, help="Scale for brevity penalty.")
     return parser.parse_args()
 
 
-def train_rloo(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig) -> List[Tuple[int, str, str]]:
-    """Train the policy using the RLOO algorithm."""
-    policy.model.train()
-    epoch_losses = []
-    epoch_rewards = []
-    output_dir = config.output_dir
-    train_samples: List[Tuple[int, str, str]] = []
+def rloo(policy: HFPolicy, prompts: List[str], config: TrainConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the log-probs, rewards, and advantages for a batch of prompts using the RLOO algorithm."""
+    # Generate k completions for each prompt
+    texts_per_prompt, logprobs = policy.generate_with_logprobs(prompts, k=config.group_size)
 
-    # Track generations of the first training prompt
-    tracking_prompt = TOPICS[0]
-    # Generate the initial generation before training
-    initial_sample = policy.generate([tracking_prompt])[0]
-    train_samples.append((0, tracking_prompt, initial_sample))
+    # Compute rewards for all completions
+    flat_texts = [text for texts in texts_per_prompt for text in texts]
+    rewards_flat = reward(flat_texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
+    rewards_tensor = rewards_flat.view(len(prompts), config.group_size)
 
-    for epoch in range(config.num_epochs):
-        batch_losses = []
-        batch_rewards = []
-        for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
-            optimizer.zero_grad()
-            prompts = batch["prompts"]
-            texts_per_prompt, logprobs = policy.generate_k_with_logprobs(
-                prompts,
-                k=config.group_size,
-            )
+    # Leave-One-Out baseline and advantages
+    sum_rewards = rewards_tensor.sum(dim=1, keepdim=True)                     # [B, 1]
+    loo_baseline = (sum_rewards - rewards_tensor) / (config.group_size - 1)   # [B, k]
+    advantages = (rewards_tensor - loo_baseline).detach()                     # [B, k]
 
-            # Rewards -> [B, k]
-            flat_texts = [text for texts in texts_per_prompt for text in texts]
-            rewards_flat = reward(flat_texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
-            rewards_tensor = rewards_flat.view(len(prompts), config.group_size)
-
-            if config.group_size < 2:
-                raise ValueError("RLOO requires group_size >= 2 for leave-one-out baseline.")
-            
-            # Leave-One-Out baseline and advantages
-            sum_rewards = rewards_tensor.sum(dim=1, keepdim=True)                     # [B, 1]
-            loo_baseline = (sum_rewards - rewards_tensor) / (config.group_size - 1)   # [B, k]
-            advantages = (rewards_tensor - loo_baseline).detach()                     # [B, k]
-
-            # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
-            loss = -(logprobs * advantages).mean()
-            loss.backward()
-            nn.utils.clip_grad_norm_(policy.model.parameters(), config.grad_clip)
-            optimizer.step()
-
-            batch_losses.append(loss.detach().item())
-            batch_rewards.append(rewards_tensor.detach().mean().item())
-
-        # Log mean loss and reward
-        mean_loss = sum(batch_losses) / max(len(batch_losses), 1)
-        mean_reward = sum(batch_rewards) / max(len(batch_rewards), 1)
-        epoch_losses.append(mean_loss)
-        epoch_rewards.append(mean_reward)
-        print(f"Epoch {epoch+1}/{config.num_epochs} loss: {mean_loss:.4f} reward: {mean_reward:.4f}")
-
-        # Save the model every `save_every` epochs
-        if config.save_every and (epoch + 1) % config.save_every == 0:
-            ckpt_path = output_dir / f"model_{epoch+1}.pth"
-            torch.save(policy.model.state_dict(), ckpt_path)
-            print(f"Model saved to {ckpt_path}")
-
-        # Generate sample after each epoch
-        sample_text = policy.generate([tracking_prompt])[0]
-        train_samples.append((epoch + 1, tracking_prompt, sample_text))
-
-    # Save the final model
-    ckpt_path = output_dir / f"model_final.pth"
-    torch.save(policy.model.state_dict(), ckpt_path)
-    print(f"Model saved to {ckpt_path}")
-    policy.model.eval()
-
-    plot_training_metrics(epoch_losses, epoch_rewards, output_dir)
-
-    # Dump loss and reward to CSV
-    metrics_path = output_dir / "training_metrics.csv"
-    with metrics_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "reward"])
-        for epoch_idx, (loss_val, reward_val) in enumerate(zip(epoch_losses, epoch_rewards), start=1):
-            writer.writerow([epoch_idx, loss_val, reward_val])
-    return train_samples
+    return logprobs, rewards_tensor, advantages
 
 
 def main():
@@ -175,7 +113,7 @@ def main():
         test_texts_before.append(texts)
 
     # Train the policy
-    train_samples = train_rloo(policy, dataloader, optimizer, config)
+    train_samples = train_reinforce(policy, dataloader, optimizer, config, rloo)
 
     # Generate completions on test prompts after training
     test_texts_after = []
