@@ -100,9 +100,9 @@ class HFPolicy:
         # Build a mask for the generated region only (exclude prompt and padding)
         _, Tm1 = tgt.shape
         idx = torch.arange(Tm1, device=self.device).unsqueeze(0)           # [1, T-1]
-        prompt_starts = lens.unsqueeze(1).to(self.device)                  # [B, 1]
+        start_idx = (lens - 1).clamp_min(0).unsqueeze(1).to(self.device)   # [B, 1]
         seq_lens = attn.sum(dim=1).unsqueeze(1)                            # [B, 1] true lengths
-        gen_mask = (idx >= prompt_starts) & (idx < seq_lens - 1)           # [B, T-1]
+        gen_mask = (idx >= start_idx) & (idx < seq_lens - 1)               # [B, T-1]
 
         # Gather token log-probs and sum over generated positions
         tok_logp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)          # [B, T-1]
