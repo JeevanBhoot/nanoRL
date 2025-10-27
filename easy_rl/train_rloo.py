@@ -7,22 +7,17 @@ https://arxiv.org/pdf/2402.14740
 3. Baseline = mean reward of the other generations for the same prompt.
 """
 
-import csv
 import torch
-import torch.nn as nn
-import tqdm
-from torch.utils.data import DataLoader
 
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
+from easy_rl.data import TEST_TOPICS, make_dataloader
 from easy_rl.hf_policy import HFPolicy
 from easy_rl.rewards import reward
-from easy_rl.plot import plot_training_metrics
 from easy_rl.train_reinforce import train_reinforce
 
 
