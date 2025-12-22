@@ -1,7 +1,7 @@
 [project]
-name = "easy-rl-for-llms"
+name = "nano-rl"
 version = "0.1.0"
-description = "Add your description here"
+description = "NanoRL: Minimal implementations of reinforcement learning algorithms applied to LLMs"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
