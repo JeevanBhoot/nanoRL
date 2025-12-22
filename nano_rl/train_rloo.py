@@ -15,10 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
-from easy_rl.data import TEST_TOPICS, make_dataloader
-from easy_rl.hf_policy import HFPolicy
-from easy_rl.rewards import reward
-from easy_rl.train_reinforce import train_reinforce
+from nano_rl.data import TEST_TOPICS, make_dataloader
+from nano_rl.hf_policy import HFPolicy
+from nano_rl.rewards import reward
+from nano_rl.train_reinforce import train_reinforce
 
 
 @dataclass

@@ -18,10 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from easy_rl.data import TOPICS, TEST_TOPICS, make_dataloader
-from easy_rl.hf_policy import HFPolicy, GenConfig
-from easy_rl.rewards import reward
-from easy_rl.plot import plot_training_metrics
+from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
+from nano_rl.hf_policy import HFPolicy, GenConfig
+from nano_rl.rewards import reward
+from nano_rl.plot import plot_training_metrics
 
 
 @dataclass
