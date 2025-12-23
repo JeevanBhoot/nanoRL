@@ -53,7 +53,7 @@ def generate_with_logprobs(model, tokenizer, prompts):
     
     # log_probs[b, t, v] = log π(v | tokens_{≤t})
     log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)                                        # [B, T-1, V] log-probs over entire vocab
-    token_log_probs = log_probs.gather(-1, output_ids[:, 1:].unsqueeze(-1)).squeeze(-1)             # [B, T-1] log-probs of generated tokens
+    token_log_probs = log_probs.gather(-1, output_ids[:, 1:].unsqueeze(-1)).squeeze(-1)             # [B, T-1] log-probs of generated tokens only
     
     # Mask out prompt and padding tokens
     # Generated tokens are at indices [prompt_len-1, ...] in shifted view
