@@ -54,7 +54,7 @@ There are three options for baseline:
 
 #### REINFORCE Leave-One-Out (RLOO)
 
-RLOO extends SCST from 1 additional generation per prompt to k.
+RLOO [1] extends SCST from 1 additional generation per prompt to k.
 The baseline for each completion is the mean rewards of the other k-1 completions.
 All k generations then contribute to one joint policy update.
 
@@ -63,3 +63,7 @@ To run RLOO:
 ```bash
 uv run --env-file .env -m nano_rl.train_rloo
 ```
+
+### References
+
+[1] "Back to Basics: Revisiting REINFORCE Style Optimization for Learning from Human Feedback in LLMs" https://arxiv.org/pdf/2402.14740
