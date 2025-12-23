@@ -2,7 +2,6 @@
 Train a policy using the REINFORCE algorithm.
 """
 
-import csv
 import torch
 import torch.nn as nn
 import tqdm
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from nano_rl.model import load_model
-from nano_rl.plot import plot_training_metrics
+from nano_rl.logging import save_test_generations, save_training_samples, save_metrics_csv, plot_training_metrics
 from nano_rl.rewards import reward
 
 
@@ -142,22 +141,13 @@ def main():
     tokenizer, model = load_model(args.model_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
-    with (args.output_dir / "test_generations.txt").open("w") as f:
-        f.write("Before Training:\n" + "\n".join([f"Q: {q}\nA: {generate(model, tokenizer, [q])[0]}\n" for q in TEST_TOPICS]))
-
+    before_texts = [generate(model, tokenizer, [q])[0] for q in TEST_TOPICS]
     samples, metrics = train(model, tokenizer, make_dataloader(), optimizer, args)
+    after_texts = [generate(model, tokenizer, [q])[0] for q in TEST_TOPICS]
     
-    with (args.output_dir / "test_generations.txt").open("a") as f:
-        f.write("\nAfter Training:\n" + "\n".join([f"Q: {q}\nA: {generate(model, tokenizer, [q])[0]}\n" for q in TEST_TOPICS]))
-        
-    with (args.output_dir / "train_generations.txt").open("w") as f:
-        f.write("\n\n".join([f"Epoch {e}\nPrompt: {p}\nGen: {g}" for e,p,g in samples]))
-        
-    with (args.output_dir / "training_metrics.csv").open("w") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "reward"])
-        writer.writerows([[i+1, *m] for i, m in enumerate(metrics)])
-        
+    save_test_generations(args.output_dir / "test_generations.txt", before_texts, after_texts, TEST_TOPICS)
+    save_training_samples(args.output_dir / "train_generations.txt", samples)
+    save_metrics_csv(args.output_dir / "training_metrics.csv", metrics)
     plot_training_metrics([m[0] for m in metrics], [m[1] for m in metrics], args.output_dir)
     
     
