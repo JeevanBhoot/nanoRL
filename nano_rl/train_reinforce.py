@@ -1,242 +1,165 @@
 """
 Train a policy using the REINFORCE algorithm.
-
-Accepts a baseline strategy: mean, ema, or scst.
-mean: use the mean reward of the batch
-ema: use an exponential moving average of the rewards
-scst: use the reward of the model's own greedy decode for the same prompt
 """
+
 import csv
 import torch
 import torch.nn as nn
 import tqdm
-from torch.utils.data import DataLoader
-
 from argparse import ArgumentParser, Namespace
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
 
 from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
-from nano_rl.hf_policy import HFPolicy, GenConfig
-from nano_rl.rewards import reward
+from nano_rl.model import load_model
 from nano_rl.plot import plot_training_metrics
-
-
-@dataclass
-class TrainConfig:
-    model_id: str = "meta-llama/Llama-3.2-1B-Instruct"
-    batch_size: int = 8
-    learning_rate: float = 1e-5
-    num_epochs: int = 25
-    grad_clip: float = 1.0
-    output_dir: Path = Path("results")
-    save_every: int = None
-    baseline: Optional[str] = None
-    baseline_ema_beta: float = 0.9
-    alpha: float = 0.0
+from nano_rl.rewards import reward
 
 
 def parse_args() -> Namespace:
     parser = ArgumentParser()
-    parser.add_argument("--model-id", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    parser.add_argument("--model-id", default="meta-llama/Llama-3.2-1B-Instruct")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--num-epochs", type=int, default=25)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-every", type=int, default=None)
-    parser.add_argument(
-        "--baseline",
-        type=str.lower,
-        choices=["mean", "ema", "scst"],
-        default=None,
-        help="Baseline strategy",
-    )
-    parser.add_argument("--baseline-ema-beta", type=float, default=0.9, help="EMA factor for moving-average baseline.")
-    parser.add_argument("--alpha", type=float, default=0.0, help="Scale for brevity penalty.")
-    return parser.parse_args()
+    parser.add_argument("--baseline", choices=["mean", "ema", "scst"], default=None)
+    parser.add_argument("--baseline-ema-beta", type=float, default=0.9)
+    parser.add_argument("--brevity-penalty-scale", type=float, default=0.0)
+    args = parser.parse_args()
+    
+    output_dir = Path(args.output_dir or f"results/{datetime.now():%Y%m%d-%H%M%S}")
+    args.output_dir = output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return args
 
 
-def reinforce(policy: HFPolicy, prompts: List[str], config: TrainConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def generate_with_logprobs(model, tokenizer, prompts):
+    """Generate completions for a batch of prompts and compute the log-probabilities of the generated tokens."""
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+    prompt_len = inputs.input_ids.shape[1] 
+
+    # 1) Sample actions from policy (no gradients during rollout)
+    with torch.no_grad():
+        output_ids = model.generate(                                                                # [B, T]
+            **inputs, max_new_tokens=256, do_sample=True, temperature=0.9,
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
+        )
+
+    # 2) Forward pass with gradients to get log π(a_t | s_{<t})
+    attention_mask = (output_ids != tokenizer.pad_token_id).long()                                  # [B, T]
+    logits = model(input_ids=output_ids, attention_mask=attention_mask, use_cache=False).logits     # [B, T, V]
+    
+    # log_probs[b, t, v] = log π(v | tokens_{≤t})
+    log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)                                        # [B, T-1, V] log-probs over entire vocab
+    token_log_probs = log_probs.gather(-1, output_ids[:, 1:].unsqueeze(-1)).squeeze(-1)             # [B, T-1] log-probs of generated tokens
+    
+    # Mask out prompt and padding tokens
+    # Generated tokens are at indices [prompt_len-1, ...] in shifted view
+    is_generated = torch.arange(token_log_probs.shape[1], device=model.device) >= (prompt_len - 1)  # [T-1]
+    is_valid = attention_mask[:, 1:].bool()                                                         # [B, T-1]
+    mask = is_generated & is_valid                                                                  # [B, T-1]
+    
+    sum_log_probs = (token_log_probs * mask).sum(dim=1)                                             # [B]
+    texts = tokenizer.batch_decode(output_ids[:, prompt_len:], skip_special_tokens=True)            # Decode generated tokens
+    
+    return texts, sum_log_probs
+
+
+def generate(model, tokenizer, prompts, do_sample=True):
+    """Generate completions for a batch of prompts."""
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, max_new_tokens=256, do_sample=do_sample, temperature=0.9,
+            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
+        )
+    return tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+
+def reinforce_step(model, tokenizer, prompts, args, ema_baseline):
     """Compute the log-probs, rewards, and advantages for a batch of prompts."""
-    texts, logprobs = policy.generate_with_logprobs(prompts)
-    rewards = reward(texts, alpha=config.alpha).to(device=logprobs.device, dtype=logprobs.dtype)
-
-    baseline_value: Optional[torch.Tensor] = None
-    if config.baseline is not None:
-        if config.baseline == "mean":
-            baseline_value = rewards.mean()
-        elif config.baseline == "ema":
-            current_mean = rewards.mean()
-            if policy.ema_baseline is None:
-                policy.ema_baseline = current_mean
-            else:
-                policy.ema_baseline = config.baseline_ema_beta * policy.ema_baseline + (1 - config.baseline_ema_beta) * current_mean
-            baseline_value = policy.ema_baseline
-        elif config.baseline == "scst":
-            # Self-critical sequence training https://arxiv.org/pdf/1612.00563
-            # Baseline = reward of the model's own greedy decode for the same prompt.
-            greedy_texts = policy.generate(prompts, gen_cfg=GenConfig(do_sample=False))
-            baseline_value = reward(greedy_texts, alpha=config.alpha).to(rewards.device)   
-        else:
-            raise ValueError(f"Unknown baseline type: {config.baseline}")
-
-    # Advantage: reward - baseline
-    # Baseline reduces variance in policy gradient estimates,
-    # while keeping it unbiased.
-    advantages = (rewards - baseline_value).detach() if baseline_value is not None else rewards.detach()
-    return logprobs, rewards, advantages
+    texts, logprobs = generate_with_logprobs(model, tokenizer, prompts)
+    rewards = reward(texts, alpha=args.brevity_penalty_scale).to(logprobs.device)
+    
+    baseline, new_ema = None, ema_baseline
+    if args.baseline == "mean":
+        baseline = rewards.mean() # Mean reward of the batch
+    elif args.baseline == "ema":
+        # Exponential moving average of the mean batch reward
+        current_mean = rewards.mean()
+        new_ema = current_mean.item() if ema_baseline is None else args.baseline_ema_beta * ema_baseline + (1 - args.baseline_ema_beta) * current_mean.item()
+        baseline = torch.tensor(new_ema, device=rewards.device)
+    elif args.baseline == "scst":
+        # Self-critical sequence training (SCST) https://arxiv.org/pdf/1612.00563
+        # Baseline = reward of the model's own greedy decode for the same prompt.
+        baseline = reward(generate(model, tokenizer, prompts, do_sample=False), alpha=args.brevity_penalty_scale).to(rewards.device)
+    # Advantage = reward - baseline -> Baseline reduces variance in policy gradient estimates, while keeping it unbiased.
+    advantages = (rewards - baseline).detach() if baseline is not None else rewards.detach()
+    return logprobs, rewards, advantages, new_ema
 
 
-def train_reinforce(policy: HFPolicy, dataloader: DataLoader, optimizer: torch.optim.Optimizer, config: TrainConfig, algorithm_function: Callable) -> List[Tuple[int, str, str]]:
-    """Train the policy using the REINFORCE algorithm."""
-    policy.model.train()
-    epoch_losses = []
-    epoch_rewards = []
-    output_dir = config.output_dir
-    train_samples: List[Tuple[int, str, str]] = []
+def train(model, tokenizer, dataloader, optimizer, args):
+    model.train()
+    samples, metrics = [], []
+    ema = None
+    track_prompt = TOPICS[0] # Track generations over time on this prompt
+    samples.append((0, track_prompt, generate(model, tokenizer, [track_prompt])[0]))
 
-    # Track generations of the first training prompt
-    tracking_prompt = TOPICS[0]
-    # Generate the initial generation before training
-    initial_sample = policy.generate([tracking_prompt])[0]
-    train_samples.append((0, tracking_prompt, initial_sample))
-
-    for epoch in range(config.num_epochs):
-        batch_losses = []
-        batch_rewards = []
-        for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
+    for epoch in range(args.num_epochs):
+        epoch_loss, epoch_reward = [], []
+        for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
             optimizer.zero_grad()
-            prompts = batch["prompts"]
-
-            logprobs, rewards, advantages = algorithm_function(policy, prompts, config)
-
+            logprobs, rewards, advantages, ema = reinforce_step(model, tokenizer, batch["prompts"], args, ema)
             # REINFORCE objective: maximise E[adv*sum log pi]  ->   minimise negative
             loss = -(logprobs * advantages).mean()
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.model.parameters(), config.grad_clip)
+            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
+            
+            epoch_loss.append(loss.detach().item())
+            epoch_reward.append(rewards.detach().mean().item())
+            
+        metrics.append((sum(epoch_loss)/len(epoch_loss), sum(epoch_reward)/len(epoch_reward)))
+        print(f"Epoch {epoch+1}: loss={metrics[-1][0]:.4f}, reward={metrics[-1][1]:.4f}")
+        
+        if args.save_every and (epoch + 1) % args.save_every == 0:
+            torch.save(model.state_dict(), args.output_dir / f"model_{epoch+1}.pth")
+            
+        samples.append((epoch + 1, track_prompt, generate(model, tokenizer, [track_prompt])[0]))
 
-            batch_losses.append(loss.detach().item())
-            batch_rewards.append(rewards.detach().mean().item())
-
-        # Log mean loss and reward
-        mean_loss = sum(batch_losses) / max(len(batch_losses), 1)
-        mean_reward = sum(batch_rewards) / max(len(batch_rewards), 1)
-        epoch_losses.append(mean_loss)
-        epoch_rewards.append(mean_reward)
-        print(f"Epoch {epoch+1}/{config.num_epochs} loss: {mean_loss:.4f} reward: {mean_reward:.4f}")
-
-        # Save the model every `save_every` epochs
-        if config.save_every and (epoch + 1) % config.save_every == 0:
-            ckpt_path = output_dir / f"model_{epoch+1}.pth"
-            torch.save(policy.model.state_dict(), ckpt_path)
-            print(f"Model saved to {ckpt_path}")
-
-        # Generate the sample after training
-        sample_text = policy.generate([tracking_prompt])[0]
-        train_samples.append((epoch + 1, tracking_prompt, sample_text))
-
-    # Save the final model
-    ckpt_path = output_dir / f"model_final.pth"
-    torch.save(policy.model.state_dict(), ckpt_path)
-    print(f"Model saved to {ckpt_path}")
-    policy.model.eval()
-
-    plot_training_metrics(epoch_losses, epoch_rewards, output_dir)
-
-    # Dump loss and reward to CSV
-    metrics_path = output_dir / "training_metrics.csv"
-    with metrics_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "reward"])
-        for epoch_idx, (loss_val, reward_val) in enumerate(zip(epoch_losses, epoch_rewards), start=1):
-            writer.writerow([epoch_idx, loss_val, reward_val])
-    return train_samples
+    torch.save(model.state_dict(), args.output_dir / "model_final.pth")
+    return samples, metrics
 
 
 def main():
     args = parse_args()
-    # Initialise output directory
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = Path("results") / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if any(output_dir.glob("model_*.pth")):
-        print(f"Existing checkpoints found in {output_dir}, exiting without training.")
-        return
+    if any(args.output_dir.glob("model_*.pth")):
+        raise ValueError(f"Checkpoints exist in {args.output_dir}, exiting.")
 
-    # Initialise training configuration
-    config = TrainConfig(
-        model_id=args.model_id,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        num_epochs=args.num_epochs,
-        grad_clip=args.grad_clip,
-        output_dir=output_dir,
-        save_every=args.save_every,
-        baseline=args.baseline,
-        baseline_ema_beta=args.baseline_ema_beta,
-        alpha=args.alpha,
-    )
+    tokenizer, model = load_model(args.model_id)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    
+    with (args.output_dir / "test_generations.txt").open("w") as f:
+        f.write("Before Training:\n" + "\n".join([f"Q: {q}\nA: {generate(model, tokenizer, [q])[0]}\n" for q in TEST_TOPICS]))
 
-    # Initialise policy (LLM), dataloader, and optimizer
-    policy = HFPolicy(config.model_id)
-    dataloader = make_dataloader(batch_size=config.batch_size)
-    test_dataloader = make_dataloader(topics=TEST_TOPICS, batch_size=1, shuffle=False)
-    optimizer = torch.optim.AdamW(policy.model.parameters(), lr=config.learning_rate)
-
-    # Generate completions on test prompts before training
-    test_texts_before = []
-    for batch in test_dataloader:
-        prompts = batch["prompts"]
-        texts = policy.generate(prompts)[0]
-        test_texts_before.append(texts)
-
-    # Train the policy
-    train_samples = train_reinforce(policy, dataloader, optimizer, config, reinforce)
-
-    # Generate completions on test prompts after training
-    test_texts_after = []
-    for batch in test_dataloader:
-        prompts = batch["prompts"]
-        texts = policy.generate(prompts)[0]
-        test_texts_after.append(texts)
-
-    print("Test text before training:")
-    print(test_texts_before[0])
-    print("Test text after training:")
-    print(test_texts_after[0])
-
-    # Save test generations
-    test_log_path = output_dir / "test_generations.txt"
-    with test_log_path.open("w", encoding="utf-8") as f:
-        f.write("Test topics:\n")
-        for topic in TEST_TOPICS:
-            f.write(topic.strip() + "\n\n")
-        f.write("Test texts before training:\n")
-        for text in test_texts_before:
-            f.write(text.strip() + "\n\n")
-        f.write("Test texts after training:\n")
-        for text in test_texts_after:
-            f.write(text.strip() + "\n\n")
-
-    # Save train generations (one sample per epoch)
-    if train_samples:
-        samples_path = output_dir / "train_generations.txt"
-        with samples_path.open("w", encoding="utf-8") as f:
-            for epoch, prompt, generation in train_samples:
-                label = "Initial" if epoch == 0 else f"Epoch {epoch}"
-                f.write(f"{label}\n")
-                f.write("Prompt:\n")
-                f.write(prompt.strip() + "\n\n")
-                f.write("Generation:\n")
-                f.write(generation.strip() + "\n\n")
-
-
+    samples, metrics = train(model, tokenizer, make_dataloader(), optimizer, args)
+    
+    with (args.output_dir / "test_generations.txt").open("a") as f:
+        f.write("\nAfter Training:\n" + "\n".join([f"Q: {q}\nA: {generate(model, tokenizer, [q])[0]}\n" for q in TEST_TOPICS]))
+        
+    with (args.output_dir / "train_generations.txt").open("w") as f:
+        f.write("\n\n".join([f"Epoch {e}\nPrompt: {p}\nGen: {g}" for e,p,g in samples]))
+        
+    with (args.output_dir / "training_metrics.csv").open("w") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "loss", "reward"])
+        writer.writerows([[i+1, *m] for i, m in enumerate(metrics)])
+        
+    plot_training_metrics([m[0] for m in metrics], [m[1] for m in metrics], args.output_dir)
+    
+    
 if __name__ == "__main__":
     main()
