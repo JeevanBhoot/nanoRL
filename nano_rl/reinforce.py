@@ -25,7 +25,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--baseline", choices=["mean", "ema", "scst"], default=None)
-    parser.add_argument("--baseline-ema-beta", type=float, default=0.9)
+    parser.add_argument("--ema-beta", type=float, default=0.9)
     parser.add_argument("--brevity-penalty-scale", type=float, default=0.0)
     args = parser.parse_args()
     
@@ -89,7 +89,7 @@ def reinforce_step(model, tokenizer, prompts, args, ema_baseline):
     elif args.baseline == "ema":
         # Exponential moving average of the mean batch reward
         current_mean = rewards.mean()
-        new_ema = current_mean.item() if ema_baseline is None else args.baseline_ema_beta * ema_baseline + (1 - args.baseline_ema_beta) * current_mean.item()
+        new_ema = current_mean.item() if ema_baseline is None else args.ema_beta * ema_baseline + (1 - args.ema_beta) * current_mean.item()
         baseline = torch.tensor(new_ema, device=rewards.device)
     elif args.baseline == "scst":
         # Self-critical sequence training (SCST) https://arxiv.org/pdf/1612.00563
