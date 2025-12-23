@@ -38,13 +38,13 @@ HF_TOKEN=hf_...
 Train Llama-3.2-1B-Instruct to maximise lexical richness using REINFORCE algorithm:
 
 ```bash
-uv run --env-file .env -m nano_rl.train_reinforce
+uv run --env-file .env -m nano_rl.reinforce
 ```
 
 REINFORCE with baseline:
 
 ```bash
-uv run --env-file .env -m nano_rl.train_reinforce --baseline=mean
+uv run --env-file .env -m nano_rl.reinforce --baseline=mean
 ```
 
 There are three options for baseline:
@@ -61,7 +61,7 @@ All k generations then contribute to one joint policy update.
 To run RLOO:
 
 ```bash
-uv run --env-file .env -m nano_rl.train_rloo
+uv run --env-file .env -m nano_rl.rloo
 ```
 
 ### References
