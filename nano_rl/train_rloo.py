@@ -25,7 +25,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--group-size", type=int, default=4, help="Number of completions per prompt (k)")
-    parser.add_argument("--brevity-penalty-scale", type=float, default=0.5)
+    parser.add_argument("--brevity-penalty-scale", type=float, default=0.0)
     args = parser.parse_args()
     
     if args.group_size < 2:
