@@ -5,13 +5,14 @@ Train a policy using the REINFORCE Leave-One-Out (RLOO) algorithm.
 import torch
 import torch.nn as nn
 import tqdm
+import wandb
 from argparse import ArgumentParser, Namespace
 from datetime import datetime
 from pathlib import Path
 
 from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
-from nano_rl.model import load_model
-from nano_rl.logging import save_test_generations, save_training_samples, save_metrics_csv, plot_training_metrics
+from nano_rl.model import load_model, generate, evaluate
+from nano_rl.logging import save_test_generations, save_training_samples
 from nano_rl.rewards import reward
 
 
@@ -75,17 +76,6 @@ def generate_with_logprobs(model, tokenizer, prompts, k):
     return texts, sum_log_probs
 
 
-def generate(model, tokenizer, prompts, do_sample=True):
-    """Generate completions for a batch of prompts."""
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, max_new_tokens=256, do_sample=do_sample, temperature=0.9,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
-        )
-    return tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
-
-
 def rloo_step(model, tokenizer, prompts, args):
     """
     Compute log-probs, rewards, and advantages using RLOO.
@@ -103,20 +93,20 @@ def rloo_step(model, tokenizer, prompts, args):
     loo_baseline = (sum_rewards - rewards) / (args.group_size - 1)                                  # [B, k]
     advantages = (rewards - loo_baseline).detach()                                                  # [B, k]
     
-    return logprobs, rewards, advantages
+    return flat_texts, logprobs, rewards, advantages
 
 
-def train(model, tokenizer, dataloader, optimizer, args):
-    model.train()
-    samples, metrics = [], []
+def train(model, tokenizer, dataloader, test_dataloader, optimizer, args):
+    samples = []
     track_prompt = TOPICS[0]
     samples.append((0, track_prompt, generate(model, tokenizer, [track_prompt])[0]))
 
     for epoch in range(args.num_epochs):
-        epoch_loss, epoch_reward = [], []
+        model.train()
+        epoch_loss, epoch_reward, epoch_gen_len = [], [], []
         for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
             optimizer.zero_grad()
-            logprobs, rewards, advantages = rloo_step(model, tokenizer, batch["prompts"], args)
+            texts, logprobs, rewards, advantages = rloo_step(model, tokenizer, batch["prompts"], args)
             # RLOO objective: same as REINFORCE, minimise -E[adv*sum log pi], but over all B*k completions
             loss = -(logprobs * advantages).mean()
             loss.backward()
@@ -125,9 +115,19 @@ def train(model, tokenizer, dataloader, optimizer, args):
             
             epoch_loss.append(loss.detach().item())
             epoch_reward.append(rewards.detach().mean().item())
-            
-        metrics.append((sum(epoch_loss)/len(epoch_loss), sum(epoch_reward)/len(epoch_reward)))
-        print(f"Epoch {epoch+1}: loss={metrics[-1][0]:.4f}, reward={metrics[-1][1]:.4f}")
+            epoch_gen_len.append(sum(len(t.split()) for t in texts) / len(texts))
+        
+        mean_loss = sum(epoch_loss) / len(epoch_loss)
+        mean_reward = sum(epoch_reward) / len(epoch_reward)
+        mean_gen_len = sum(epoch_gen_len) / len(epoch_gen_len)
+        
+        _, test_reward, test_gen_len = evaluate(model, tokenizer, test_dataloader, args)
+        
+        wandb.log({
+            "train/loss": mean_loss, "train/reward": mean_reward, "train/gen_length": mean_gen_len,
+            "test/reward": test_reward, "test/gen_length": test_gen_len, "epoch": epoch + 1
+        })
+        print(f"Epoch {epoch+1}: loss={mean_loss:.4f}, reward={mean_reward:.4f}, test_reward={test_reward:.4f}")
         
         if args.save_every and (epoch + 1) % args.save_every == 0:
             torch.save(model.state_dict(), args.output_dir / f"model_{epoch+1}.pth")
@@ -135,7 +135,7 @@ def train(model, tokenizer, dataloader, optimizer, args):
         samples.append((epoch + 1, track_prompt, generate(model, tokenizer, [track_prompt])[0]))
 
     torch.save(model.state_dict(), args.output_dir / "model_final.pth")
-    return samples, metrics
+    return samples
 
 
 def main():
@@ -143,17 +143,23 @@ def main():
     if any(args.output_dir.glob("model_*.pth")):
         raise ValueError(f"Checkpoints exist in {args.output_dir}, exiting.")
 
+    wandb.init(project="nano-rl", name=args.output_dir.name, config=vars(args))
     tokenizer, model = load_model(args.model_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
-    before_texts = [generate(model, tokenizer, [q])[0] for q in TEST_TOPICS]
-    samples, metrics = train(model, tokenizer, make_dataloader(batch_size=args.batch_size), optimizer, args)
-    after_texts = [generate(model, tokenizer, [q])[0] for q in TEST_TOPICS]
+    train_dataloader = make_dataloader(batch_size=args.batch_size)
+    test_dataloader = make_dataloader(topics=TEST_TOPICS, batch_size=len(TEST_TOPICS), shuffle=False)
+    
+    before_texts, before_reward, before_gen_len = evaluate(model, tokenizer, test_dataloader, args)
+    wandb.log({"test/reward": before_reward, "test/gen_length": before_gen_len, "epoch": 0})
+    
+    samples = train(model, tokenizer, train_dataloader, test_dataloader, optimizer, args)
+    
+    after_texts, _, _ = evaluate(model, tokenizer, test_dataloader, args)
     
     save_test_generations(args.output_dir / "test_generations.txt", before_texts, after_texts, TEST_TOPICS)
     save_training_samples(args.output_dir / "train_generations.txt", samples)
-    save_metrics_csv(args.output_dir / "training_metrics.csv", metrics)
-    plot_training_metrics([m[0] for m in metrics], [m[1] for m in metrics], args.output_dir)
+    wandb.finish()
 
 
 if __name__ == "__main__":
