@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from nano_rl.rewards import reward
+from nano_rl.rewards import reward, ttr
 
 
 def load_model(model_id):
@@ -23,12 +23,13 @@ def generate(model, tokenizer, prompts, do_sample=True):
 
 
 def evaluate(model, tokenizer, test_dataloader, args):
-    """Evaluate on test set, return (texts, mean_reward, mean_gen_length)."""
+    """Evaluate on test set, return (texts, mean_reward, mean_ttr, mean_gen_length)."""
     model.eval()
     all_texts = []
     for batch in test_dataloader:
         texts = generate(model, tokenizer, batch["prompts"])
         all_texts.extend(texts)
     rewards = reward(all_texts, alpha=args.brevity_penalty_scale)
+    mean_ttr = sum(ttr(t) for t in all_texts) / len(all_texts)
     mean_gen_len = sum(len(t.split()) for t in all_texts) / len(all_texts)
-    return all_texts, rewards.mean().item(), mean_gen_len
+    return all_texts, rewards.mean().item(), mean_ttr, mean_gen_len

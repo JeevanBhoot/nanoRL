@@ -13,7 +13,7 @@ from pathlib import Path
 from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
 from nano_rl.model import load_model, generate, evaluate
 from nano_rl.logging import save_test_generations, save_training_samples
-from nano_rl.rewards import reward
+from nano_rl.rewards import reward, ttr
 
 
 def parse_args() -> Namespace:
@@ -103,7 +103,7 @@ def train(model, tokenizer, dataloader, test_dataloader, optimizer, args):
 
     for epoch in range(args.num_epochs):
         model.train()
-        epoch_loss, epoch_reward, epoch_gen_len = [], [], []
+        epoch_loss, epoch_reward, epoch_ttr, epoch_gen_len = [], [], [], []
         for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
             optimizer.zero_grad()
             texts, logprobs, rewards, advantages = rloo_step(model, tokenizer, batch["prompts"], args)
@@ -115,19 +115,21 @@ def train(model, tokenizer, dataloader, test_dataloader, optimizer, args):
             
             epoch_loss.append(loss.detach().item())
             epoch_reward.append(rewards.detach().mean().item())
+            epoch_ttr.append(sum(ttr(t) for t in texts) / len(texts))
             epoch_gen_len.append(sum(len(t.split()) for t in texts) / len(texts))
         
         mean_loss = sum(epoch_loss) / len(epoch_loss)
         mean_reward = sum(epoch_reward) / len(epoch_reward)
+        mean_ttr = sum(epoch_ttr) / len(epoch_ttr)
         mean_gen_len = sum(epoch_gen_len) / len(epoch_gen_len)
         
-        _, test_reward, test_gen_len = evaluate(model, tokenizer, test_dataloader, args)
+        _, test_reward, test_ttr, test_gen_len = evaluate(model, tokenizer, test_dataloader, args)
         
         wandb.log({
-            "train/loss": mean_loss, "train/reward": mean_reward, "train/gen_length": mean_gen_len,
-            "test/reward": test_reward, "test/gen_length": test_gen_len, "epoch": epoch + 1
+            "train/loss": mean_loss, "train/reward": mean_reward, "train/ttr": mean_ttr, "train/gen_length": mean_gen_len,
+            "test/reward": test_reward, "test/ttr": test_ttr, "test/gen_length": test_gen_len, "epoch": epoch + 1
         })
-        print(f"Epoch {epoch+1}: loss={mean_loss:.4f}, reward={mean_reward:.4f}, test_reward={test_reward:.4f}")
+        print(f"Epoch {epoch+1}: loss={mean_loss:.4f}, reward={mean_reward:.4f}, ttr={mean_ttr:.4f}, test_reward={test_reward:.4f}, test_ttr={test_ttr:.4f}")
         
         if args.save_every and (epoch + 1) % args.save_every == 0:
             torch.save(model.state_dict(), args.output_dir / f"model_{epoch+1}.pth")
@@ -150,12 +152,12 @@ def main():
     train_dataloader = make_dataloader(batch_size=args.batch_size)
     test_dataloader = make_dataloader(topics=TEST_TOPICS, batch_size=len(TEST_TOPICS), shuffle=False)
     
-    before_texts, before_reward, before_gen_len = evaluate(model, tokenizer, test_dataloader, args)
-    wandb.log({"test/reward": before_reward, "test/gen_length": before_gen_len, "epoch": 0})
+    before_texts, before_reward, before_ttr, before_gen_len = evaluate(model, tokenizer, test_dataloader, args)
+    wandb.log({"test/reward": before_reward, "test/ttr": before_ttr, "test/gen_length": before_gen_len, "epoch": 0})
     
     samples = train(model, tokenizer, train_dataloader, test_dataloader, optimizer, args)
     
-    after_texts, _, _ = evaluate(model, tokenizer, test_dataloader, args)
+    after_texts, _, _, _ = evaluate(model, tokenizer, test_dataloader, args)
     
     save_test_generations(args.output_dir / "test_generations.txt", before_texts, after_texts, TEST_TOPICS)
     save_training_samples(args.output_dir / "train_generations.txt", samples)
