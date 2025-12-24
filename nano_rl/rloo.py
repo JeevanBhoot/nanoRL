@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from nano_rl.data import TOPICS, TEST_TOPICS, make_dataloader
-from nano_rl.model import load_model
+from nano_rl.model import load_model, generate, evaluate
 from nano_rl.logging import save_test_generations, save_training_samples
 from nano_rl.rewards import reward
 
@@ -76,17 +76,6 @@ def generate_with_logprobs(model, tokenizer, prompts, k):
     return texts, sum_log_probs
 
 
-def generate(model, tokenizer, prompts, do_sample=True):
-    """Generate completions for a batch of prompts."""
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, max_new_tokens=256, do_sample=do_sample, temperature=0.9,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
-        )
-    return tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
-
-
 def rloo_step(model, tokenizer, prompts, args):
     """
     Compute log-probs, rewards, and advantages using RLOO.
@@ -105,18 +94,6 @@ def rloo_step(model, tokenizer, prompts, args):
     advantages = (rewards - loo_baseline).detach()                                                  # [B, k]
     
     return flat_texts, logprobs, rewards, advantages
-
-
-def evaluate(model, tokenizer, test_dataloader, args):
-    """Evaluate on test set, return (texts, mean_reward, mean_gen_length)."""
-    model.eval()
-    all_texts = []
-    for batch in test_dataloader:
-        texts = generate(model, tokenizer, batch["prompts"])
-        all_texts.extend(texts)
-    rewards = reward(all_texts, alpha=args.brevity_penalty_scale)
-    mean_gen_len = sum(len(t.split()) for t in all_texts) / len(all_texts)
-    return all_texts, rewards.mean().item(), mean_gen_len
 
 
 def train(model, tokenizer, dataloader, test_dataloader, optimizer, args):
