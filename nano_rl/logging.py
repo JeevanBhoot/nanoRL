@@ -1,5 +1,3 @@
-import csv
-import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import List, Tuple
 
